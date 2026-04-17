@@ -22,7 +22,10 @@ int dup(int);
 int getpid(void);
 char* sbrk(int);
 int sleep(int);
+int hello(void);
 int uptime(void);
+struct pstat;
+int getprocs(struct pstat*);
 
 // ulib.c
 int stat(const char*, struct stat*);

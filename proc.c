@@ -1,5 +1,6 @@
 #include "types.h"
 #include "defs.h"
+#include "pstat.h"
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
@@ -15,6 +16,7 @@ struct {
 static struct proc *initproc;
 
 int nextpid = 1;
+uint global_creation_counter = 1; // FCFS B
 extern void forkret(void);
 extern void trapret(void);
 
@@ -88,6 +90,8 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+p->creation_time = global_creation_counter++; // FCFS C
+// cprintf("PID=%d creation_time=%d\n", p->pid, p->creation_time); -->For Testing 
 
   release(&ptable.lock);
 
@@ -324,21 +328,30 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-  c->proc = 0;
-  
-  for(;;){
+  c->proc = 0; 
+for(;;){
     // Enable interrupts on this processor.
     sti();
 
-    // Loop over process table looking for process to run.
+struct proc *first_p = 0; // Pointer to the oldest process
+
     acquire(&ptable.lock);
+    
+    // Pass 1: Scan the entire table to find the oldest RUNNABLE process
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
+      
+      // If this is the first runnable one we found, or if it has an older ticket
+      if(first_p == 0 || p->creation_time < first_p->creation_time) {
+        first_p = p; 
+      }
+    }
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
+    // Pass 2: If we found a process, run it!
+    if(first_p != 0) {
+      p = first_p; 
+      
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
@@ -346,18 +359,16 @@ scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
       c->proc = 0;
     }
     release(&ptable.lock);
 
-  }
+   }
 }
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
-// intena because intena is a property of this
+//ntena because intena is a property of this
 // kernel thread, not this CPU. It should
 // be proc->intena and proc->ncli, but that would
 // break in the few places where a lock is held but
@@ -531,4 +542,31 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+
+
+
+int
+getprocs(struct pstat *ps)
+{
+  struct proc *p;
+  int i = 0;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == UNUSED){
+      ps->inuse[i] = 0;
+    } else {
+      ps->inuse[i] = 1;
+      ps->pid[i] = p->pid;
+      ps->state[i] = p->state;
+      ps->creation_time[i] = p->creation_time;
+      safestrcpy(ps->name[i], p->name, sizeof(p->name));
+    }
+    i++;
+  }
+  release(&ptable.lock);
+
+  return 0;
 }
