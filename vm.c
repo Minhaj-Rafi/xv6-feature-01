@@ -233,10 +233,21 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
   for(; a < newsz; a += PGSIZE){
     mem = kalloc();
     if(mem == 0){
-      cprintf("allocuvm out of memory\n");
-      deallocuvm(pgdir, newsz, oldsz);
-      return 0;
+      // OUT OF MEMORY! Call our Clock Algorithm to kick a page out
+      if(evict_page(myproc()) == 1) {
+        mem = kalloc(); // Try to grab that newly freed space!
+      }
+      
+      // If it is STILL zero, the hard drive must be full too. Complete failure.
+      if(mem == 0) {
+        cprintf("allocuvm absolutely out of memory and swap space\n");
+        deallocuvm(pgdir, a, oldsz);
+        return 0;
+      }
     }
+
+
+
     memset(mem, 0, PGSIZE);
     if(mappages(pgdir, (char*)a, PGSIZE, V2P(mem), PTE_W|PTE_U) < 0){
       cprintf("allocuvm out of memory (2)\n");
@@ -391,4 +402,86 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 // Blank page.
 //PAGEBREAK!
 // Blank page.
+
+
+
+
+
+
+
+
+// Rescue a page from the hard drive when a Page Fault occurs
+int handle_page_fault(uint fault_addr) {
+  struct proc *curproc = myproc();
+  pte_t *pte;
+  
+  // 1. Round the faulting address down to the nearest page boundary
+  fault_addr = PGROUNDDOWN(fault_addr);
+  
+  // 2. Find the Page Table Entry for this address
+  pte = walkpgdir(curproc->pgdir, (void*)fault_addr, 0);
+  
+  // 3. Check our secret hardware flag! Is it on the disk?
+  if(pte && (*pte & PTE_S)) {
+    
+    // 4. Allocate a fresh page of physical RAM
+    char *mem = kalloc();
+    if(mem == 0) return -1; // System is totally out of memory
+    
+    // 5. Read the data back from the hard drive
+    uint blockno = *pte >> 12; // Extract the disk block number from the PTE
+    swapRead(mem, blockno);
+    
+    // 6. Update the hardware: Clear the Swap flag, set the Present flag
+    *pte = V2P(mem) | PTE_P | PTE_W | PTE_U;
+    
+    // 7. Flush the CPU's memory cache so it sees the restored page
+    lcr3(V2P(curproc->pgdir)); 
+    
+    return 1; // Rescue successful!
+  }
+  
+  return -1; // It wasn't on the disk. This is a real crash.
+}
+
+
+// The Clock (Second-Chance) Page Replacement Algorithm
+int evict_page(struct proc *p) {
+  pte_t *pte;
+  
+  // Sweep through the process's memory like the hand of a clock
+  for(uint i = 0; i < p->sz; i += PGSIZE) {
+    pte = walkpgdir(p->pgdir, (void*)i, 0);
+
+    // If the page actually exists in RAM and belongs to the user
+    if(pte && (*pte & PTE_P) && (*pte & PTE_U)) {
+
+      // Does it have a Second Chance? (Has it been used recently?)
+      if(*pte & PTE_A) {
+        *pte &= ~PTE_A;      // Strip the second chance (clear the Accessed bit)
+        lcr3(V2P(p->pgdir)); // Tell the CPU we changed the rule
+      } 
+      // NO SECOND CHANCE LEFT - THIS IS OUR VICTIM!
+      else {
+        uint physical_addr = PTE_ADDR(*pte);
+        char *v_addr = P2V(physical_addr);
+
+        // 1. Kick the memory to the hard drive
+        uint blockno = swapWrite(v_addr);
+
+        // 2. Update the Page Table to show it is swapped out
+        *pte = (blockno << 12) | PTE_S | PTE_W | PTE_U;
+        *pte &= ~PTE_P;      // Clear the Present bit to trigger Trap 14 later
+        
+        lcr3(V2P(p->pgdir)); // Flush the CPU cache
+        kfree(v_addr);       // Actually delete the data from physical RAM!
+
+        return 1; // Eviction successful! We freed up 1 page.
+      }
+    }
+  }
+  return -1; // Failed to find a victim
+}
+
+
 

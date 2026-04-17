@@ -60,6 +60,24 @@ trap(struct trapframe *tf)
     ideintr();
     lapiceoi();
     break;
+
+
+
+case T_PGFLT:
+    // Attempt the rescue!
+    if (handle_page_fault(rcr2()) == 1) {
+      // The page was restored from disk. Do nothing and let the program resume!
+      break; 
+    } else {
+      // The rescue failed (it was a genuine crash or out of memory)
+      cprintf("Segmentation Fault: Virtual Address 0x%x is invalid.\n", rcr2());
+      myproc()->killed = 1;
+      break;
+    }
+
+
+
+
   case T_IRQ0 + IRQ_IDE+1:
     // Bochs generates spurious IDE1 interrupts.
     break;

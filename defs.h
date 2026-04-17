@@ -187,6 +187,15 @@ void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
-
+int             handle_page_fault(uint);
+int             evict_page(struct proc*);
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+
+
+
+// swap.c
+void            swapinit(void);
+uint            swapWrite(char*);
+void            swapRead(char*, uint);
