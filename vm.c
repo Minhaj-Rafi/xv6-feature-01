@@ -218,6 +218,8 @@ loaduvm(pde_t *pgdir, char *addr, struct inode *ip, uint offset, uint sz)
 
 // Allocate page tables and physical memory to grow process from oldsz to
 // newsz, which need not be page aligned.  Returns new size or 0 on error.
+
+
 int
 allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 {
@@ -231,33 +233,35 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 
   a = PGROUNDUP(oldsz);
   for(; a < newsz; a += PGSIZE){
+    
+    // 1. Get a data page (Retry until successful)
     mem = kalloc();
-    if(mem == 0){
-      // OUT OF MEMORY! Call our Clock Algorithm to kick a page out
-      if(evict_page(myproc()) == 1) {
-        mem = kalloc(); // Try to grab that newly freed space!
-      }
-      
-      // If it is STILL zero, the hard drive must be full too. Complete failure.
-      if(mem == 0) {
-        cprintf("allocuvm absolutely out of memory and swap space\n");
-        deallocuvm(pgdir, a, oldsz);
+    while(mem == 0){
+      if(evict_page(myproc()) < 0) {
+        cprintf("allocuvm out of memory\n");
+        deallocuvm(pgdir, newsz, oldsz);
         return 0;
       }
+      mem = kalloc();
     }
-
-
-
     memset(mem, 0, PGSIZE);
-    if(mappages(pgdir, (char*)a, PGSIZE, V2P(mem), PTE_W|PTE_U) < 0){
-      cprintf("allocuvm out of memory (2)\n");
-      deallocuvm(pgdir, newsz, oldsz);
-      kfree(mem);
-      return 0;
+    
+    // 2. Build the Page Table (Retry until successful!)
+    // If Core 1 steals our memory, mappages fails. We just evict again and retry!
+    while(mappages(pgdir, (char*)a, PGSIZE, V2P(mem), PTE_W|PTE_U) < 0){
+      if(evict_page(myproc()) < 0) {
+        cprintf("allocuvm out of memory (2)\n");
+        deallocuvm(pgdir, newsz, oldsz);
+        kfree(mem);
+        return 0;
+      }
     }
   }
   return newsz;
 }
+
+
+
 
 // Deallocate user pages to bring the process size from oldsz to
 // newsz.  oldsz and newsz need not be page-aligned, nor does newsz
@@ -426,11 +430,18 @@ int handle_page_fault(uint fault_addr) {
     
     // 4. Allocate a fresh page of physical RAM
     char *mem = kalloc();
-    if(mem == 0) return -1; // System is totally out of memory
+if(mem == 0) {
+        // DEADLOCK PREVENTED: Wake up the Bouncer to make room!
+        evict_page(myproc());
+        mem = kalloc(); // Try to get a page again
+        
+        if(mem == 0) return -1; // If it STILL fails, the OS is truly doomed
+    }
     
     // 5. Read the data back from the hard drive
     uint blockno = *pte >> 12; // Extract the disk block number from the PTE
     swapRead(mem, blockno);
+cprintf("KERNEL: Trap 14 Rescue! Fetched missing page from Block %d\n", blockno);
     
     // 6. Update the hardware: Clear the Swap flag, set the Present flag
     *pte = V2P(mem) | PTE_P | PTE_W | PTE_U;
@@ -446,42 +457,53 @@ int handle_page_fault(uint fault_addr) {
 
 
 // The Clock (Second-Chance) Page Replacement Algorithm
+// True Circular Clock Algorithm
 int evict_page(struct proc *p) {
   pte_t *pte;
+  static uint clock_hand = 0; // The missing piece! Remembers where we left off.
+
+  if(p->sz == 0) return -1;
   
-  // Sweep through the process's memory like the hand of a clock
-  for(uint i = 0; i < p->sz; i += PGSIZE) {
-    pte = walkpgdir(p->pgdir, (void*)i, 0);
+  // Ensure clock hand is within bounds
+  if(clock_hand >= p->sz) clock_hand = 0;
 
-    // If the page actually exists in RAM and belongs to the user
-    if(pte && (*pte & PTE_P) && (*pte & PTE_U)) {
+  // Sweep through memory up to TWO times
+  for(int pass = 0; pass < 2; pass++) {
+    uint curr = clock_hand;
+    
+    for(uint i = 0; i < p->sz; i += PGSIZE) {
+      pte = walkpgdir(p->pgdir, (void*)curr, 0);
 
-      // Does it have a Second Chance? (Has it been used recently?)
-      if(*pte & PTE_A) {
-        *pte &= ~PTE_A;      // Strip the second chance (clear the Accessed bit)
-        lcr3(V2P(p->pgdir)); // Tell the CPU we changed the rule
-      } 
-      // NO SECOND CHANCE LEFT - THIS IS OUR VICTIM!
-      else {
-        uint physical_addr = PTE_ADDR(*pte);
-        char *v_addr = P2V(physical_addr);
-
-        // 1. Kick the memory to the hard drive
-        uint blockno = swapWrite(v_addr);
-
-        // 2. Update the Page Table to show it is swapped out
-        *pte = (blockno << 12) | PTE_S | PTE_W | PTE_U;
-        *pte &= ~PTE_P;      // Clear the Present bit to trigger Trap 14 later
+      // If the page exists and belongs to the user
+      if(pte && (*pte & PTE_P) && (*pte & PTE_U)) {
         
-        lcr3(V2P(p->pgdir)); // Flush the CPU cache
-        kfree(v_addr);       // Actually delete the data from physical RAM!
+        // Give it a second chance
+        if(*pte & PTE_A) {
+          *pte &= ~PTE_A;      
+          lcr3(V2P(p->pgdir)); 
+        } 
+        else {
+          // NO SECOND CHANCE LEFT - EVICT!
+          uint physical_addr = PTE_ADDR(*pte);
+          char *v_addr = P2V(physical_addr);
 
-        return 1; // Eviction successful! We freed up 1 page.
+          uint blockno = swapWrite(v_addr);
+          cprintf("KERNEL: RAM Full! Bouncer evicted a page to Disk Block %d\n", blockno);
+
+          *pte = (blockno << 12) | PTE_S | PTE_W | PTE_U;
+          *pte &= ~PTE_P;      
+          lcr3(V2P(p->pgdir)); 
+          kfree(v_addr);       
+
+          // Move the clock hand forward for the NEXT time we need memory
+          clock_hand = curr + PGSIZE;
+          return 1; 
+        }
       }
+      // Move to the next page, wrap around in a circle if we hit the end
+      curr += PGSIZE;
+      if(curr >= p->sz) curr = 0;
     }
   }
-  return -1; // Failed to find a victim
+  return -1; 
 }
-
-
-

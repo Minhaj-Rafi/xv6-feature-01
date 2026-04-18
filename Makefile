@@ -92,7 +92,7 @@ CFLAGS += -fno-pie -nopie
 endif
 
 xv6.img: bootblock kernel
-	dd if=/dev/zero of=xv6.img count=250000
+	dd if=/dev/zero of=xv6.img count=2500000
 	dd if=bootblock of=xv6.img conv=notrunc
 	dd if=kernel of=xv6.img seek=1 conv=notrunc
 

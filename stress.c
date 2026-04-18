@@ -10,7 +10,7 @@ int main(void) {
     
     // Loop 250 times, asking for 100 Pages (400KB) every single loop
     // Total request: ~100 Megabytes (More than enough to trigger pressure)
-    for(int i = 1; i <= 250; i++) {
+    for(int i = 1; i <= 2000; i++) {
         char *mem = malloc(4096 * 100); 
         
         if(mem == 0) {
